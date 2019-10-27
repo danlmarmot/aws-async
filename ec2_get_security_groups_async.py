@@ -1,19 +1,16 @@
+import requests
+
 import asyncio
 from aiohttp import ClientSession
-
-import requests
 
 import datetime
 import hashlib
 import hmac
 import urllib.parse
+import xml.etree.ElementTree as ET
 
 import os
 import sys
-
-# from botocore.auth import SigV4Auth
-# from botocore.awsrequest import AWSRequest
-# from botocore.session import Session
 
 ACCESS_KEY = os.environ.get('AWS_ACCESS_KEY_ID')
 SECRET_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY')
@@ -23,7 +20,6 @@ if ACCESS_KEY is None or SECRET_KEY is None:
 
 EC2_ENDPOINT = "https://ec2.amazonaws.com/"
 
-
 # Some reference docs
 # https://charemza.name/blog/posts/aws/python/you-might-not-need-boto-3/
 #   Example using S3, does not use boto3 or botocore
@@ -31,46 +27,17 @@ EC2_ENDPOINT = "https://ec2.amazonaws.com/"
 #   Uses botocore for signing and the like
 # https://docs.aws.amazon.com/general/latest/gr/sigv4-signed-request-examples.html
 #   AWS example in Python on how to create a signed request
-#
-# In general, AWS recommends using POST rather than GET.
-
+#   In general, AWS recommends using POST rather than GET.
 
 def main():
-    region_response = ec2_get_regions_async()
-    print(sorted([x['RegionName'] for x in region_response['Regions']]))
-    # func_name = 'hello-world-{}'
-    # funcs_and_payloads = ((func_name.format(i), dict(hello=i)) for i in range(100))
-    #
-    # lambda_responses = invoke_all(funcs_and_payloads)
-    #
-    # Do some further processing with the responses
-
-    # for region_name in regions:
-    #     client = boto3_session.client('ec2', region_name=region_name)
-    #     ec2_response = client.describe_security_groups()
+    region_names = ec2_get_region_names_async()
+    print(region_names)
 
 
-# def get_regions(boto3_session):
-#     ec2c = boto3_session.client('ec2', region_name='us-east-1')  
-#
-#     try:
-#         region_response = ec2c.describe_regions()  
-#
-#     except botocore.exceptions.ClientError as e: 
-#         rv = "Error" + e.response['Error']['Message'] + "(code: " + e.response['Error']['Message'] + ")" 
-#         return rv  
-#
-#     if region_response['ResponseMetadata']['HTTPStatusCode'] != 200:  
-#         return "couldn't get regions"  
-#
-#     regions = sorted([x['RegionName'] for x in region_response['Regions']]))
-#
-#     return ', '.join(regions)
-
-
-def ec2_get_regions_sync():
+def ec2_get_region_names_sync():
     # https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeRegions.html
     # https://ec2.amazonaws.com/?Action=DescribeRegions
+
     query = {
         'Action': 'DescribeRegions',
         'Version': '2013-10-15'
@@ -89,40 +56,51 @@ def ec2_get_regions_sync():
                                  payload='')
 
     request_url = EC2_ENDPOINT + '?' + query_str
-    r = requests.post(request_url, headers=headers)
-    print('Response code: %d\n' % r.status_code)
-    print(r.text)
+    response = requests.post(request_url, headers=headers)
+
+    # parse the XML for region names; note the XML namespace
+    region_xml = ET.fromstring(response.text)
+    region_names = sorted(
+        [item.text for item in region_xml.iter('{http://ec2.amazonaws.com/doc/2013-10-15/}regionName')])
+
+    return region_names
 
 
-# def ec2_get_regions_async():
-#     async def wrapped():
-#         async with ClientSession(raise_for_status=True) as session:
-#             regions = ec2_get_regions_aiohttp(session)
-#             return await asyncio.gather(regions)
-#
-#     async def ec2_get_regions_aiohttp(session):
-#         query = {
-#             'Action': 'DescribeRegions',
-#             'Version': '2013-10-15'
-#         }
-#         # ensure sort order is correct
-#         query = {k: query[k] for k in sorted(query)}
-#
-#         query_str = '&'.join([f'{key}={value}' for key, value in query.items()])
-#
-#         headers = aws_sig_v4_headers(ACCESS_KEY, SECRET_KEY, {},
-#                                      'ec2', 'us-east-1',
-#                                      host='ec2.amazonaws.com',
-#                                      method="POST",
-#                                      path='/',
-#                                      query=query,
-#                                      payload='')
-#
-#         request_url = EC2_ENDPOINT + '?' + query_str
-#         async with session.post(request_url, headers=headers) as response:
-#             return await response
-#
-#     return asyncio.get_event_loop().run_until_complete(wrapped())
+def ec2_get_region_names_async():
+    result = asyncio.run(ec2_get_region_names_aiohttp())
+
+    return result
+
+async def ec2_get_region_names_aiohttp():
+    query = {
+        'Action': 'DescribeRegions',
+        'Version': '2013-10-15'
+    }
+    # ensure sort order is correct
+    query = {k: query[k] for k in sorted(query)}
+
+    query_str = '&'.join([f'{key}={value}' for key, value in query.items()])
+
+    headers = aws_sig_v4_headers(ACCESS_KEY, SECRET_KEY, {},
+                                 'ec2', 'us-east-1',
+                                 host='ec2.amazonaws.com',
+                                 method="POST",
+                                 path='/',
+                                 query=query,
+                                 payload='')
+
+    request_url = EC2_ENDPOINT + '?' + query_str
+
+    async with ClientSession() as session:
+        response = await session.post(request_url, headers=headers)
+        response_text = await response.text()
+
+    # parse the XML for region names; note the XML namespace
+    region_xml = ET.fromstring(response_text)
+    region_names = sorted(
+        [item.text for item in region_xml.iter('{http://ec2.amazonaws.com/doc/2013-10-15/}regionName')])
+
+    return region_names
 
 
 def aws_sig_v4_headers(access_key_id, secret_access_key, pre_auth_headers,
