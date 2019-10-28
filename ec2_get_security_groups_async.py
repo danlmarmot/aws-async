@@ -9,6 +9,8 @@ import hmac
 import urllib.parse
 import xml.etree.ElementTree as ET
 
+import xmltodict
+
 import os
 import sys
 
@@ -35,7 +37,9 @@ _session = None
 
 def main():
     region_names = ec2_get_region_names_async()
-    print(region_names)
+
+    security_groups = ec2_get_security_groups_async()
+    print(security_groups)
 
 
 def ec2_get_region_names_sync():
@@ -74,6 +78,47 @@ def ec2_get_region_names_sync():
     ]
 
     return sorted(region_names)
+
+
+def ec2_get_security_groups_async():
+    result = asyncio.run(ec2_get_security_groups_task())
+
+    return result
+
+
+async def ec2_get_security_groups_task():
+    # https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeSecurityGroups.html
+    # https://ec2.amazonaws.com/?Action=DescribeSecurityGroups
+
+    query = {"Action": "DescribeSecurityGroups", "Version": "2016-11-15"}
+    # ensure sort order is correct
+    query = {k: query[k] for k in sorted(query)}
+
+    query_str = "&".join([f"{key}={value}" for key, value in query.items()])
+
+    headers = aws_sig_v4_headers(
+        ACCESS_KEY,
+        SECRET_KEY,
+        {},
+        "ec2",
+        "us-east-1",
+        host="ec2.amazonaws.com",
+        method="POST",
+        path="/",
+        query=query,
+        payload="",
+    )
+
+    request_url = EC2_ENDPOINT + "?" + query_str
+
+    async with aiohttp.ClientSession() as session:
+        response = await session.post(request_url, headers=headers)
+        response_text = await response.text()
+
+    sgs_full = xmltodict.parse(response_text)
+    groups = sgs_full["DescribeSecurityGroupsResponse"]["securityGroupInfo"]["item"]
+
+    return groups
 
 
 def ec2_get_region_names_async():
