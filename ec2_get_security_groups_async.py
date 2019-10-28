@@ -104,10 +104,9 @@ async def ec2_get_region_names_aiohttp():
 
     request_url = EC2_ENDPOINT + "?" + query_str
 
-    # async with ClientSession() as session:
-    session = await get_session()
-    response = await session.post(request_url, headers=headers)
-    response_text = await response.text()
+    async with aiohttp.ClientSession() as session:
+        response = await session.post(request_url, headers=headers)
+        response_text = await response.text()
 
     # parse the XML for region names; note the XML namespace
     region_xml = ET.fromstring(response_text)
