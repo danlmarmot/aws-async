@@ -10,6 +10,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 
 import xmltodict
+from copy import deepcopy
 
 import os
 import sys
@@ -20,8 +21,6 @@ if ACCESS_KEY is None or SECRET_KEY is None:
     print("No access key is available.")
     sys.exit()
 
-EC2_ENDPOINT = "https://ec2.amazonaws.com/"
-
 # Some reference docs
 # https://charemza.name/blog/posts/aws/python/you-might-not-need-boto-3/
 #   Example using S3, does not use boto3 or botocore
@@ -31,14 +30,14 @@ EC2_ENDPOINT = "https://ec2.amazonaws.com/"
 #   AWS example in Python on how to create a signed request
 #   In general, AWS recommends using POST rather than GET.
 
-# Global session for aiohttp, maintains connection pool, ete etc
-_session = None
-
 
 def main():
     region_names = ec2_get_region_names_async()
 
-    security_groups = ec2_get_security_groups_async()
+    security_groups = asyncio.run(
+        ec2_get_security_groups_async(region_names=region_names)
+    )
+
     print(security_groups)
 
 
@@ -65,7 +64,7 @@ def ec2_get_region_names_sync():
         payload="",
     )
 
-    request_url = EC2_ENDPOINT + "?" + query_str
+    request_url = "https://ec2.amazonaws.com" + "?" + query_str
     response = requests.post(request_url, headers=headers)
 
     # parse the XML for region names; note the XML namespace
@@ -80,50 +79,75 @@ def ec2_get_region_names_sync():
     return sorted(region_names)
 
 
-def ec2_get_security_groups_async():
-    result = asyncio.run(ec2_get_security_groups_task())
+async def ec2_get_security_groups_async(region_names, **kwargs):
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for region_name in region_names:
+            tasks.append(
+                ec2_get_security_groups_task(region_name, session=session, **kwargs)
+            )
+        all_task_results = await asyncio.gather(*tasks)
 
+    # flatten list of lists
+    result = [item for one_task_result in all_task_results for item in one_task_result]
     return result
 
 
-async def ec2_get_security_groups_task():
+async def ec2_get_security_groups_task(region_name: str, **kwargs):
     # https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeSecurityGroups.html
     # https://ec2.amazonaws.com/?Action=DescribeSecurityGroups
 
+    # Build query, and ensure it's sorted
     query = {"Action": "DescribeSecurityGroups", "Version": "2016-11-15"}
-    # ensure sort order is correct
     query = {k: query[k] for k in sorted(query)}
-
-    query_str = "&".join([f"{key}={value}" for key, value in query.items()])
 
     headers = aws_sig_v4_headers(
         ACCESS_KEY,
         SECRET_KEY,
         {},
         "ec2",
-        "us-east-1",
-        host="ec2.amazonaws.com",
+        region_name,
+        host=f"ec2.{region_name}.amazonaws.com",
         method="POST",
         path="/",
         query=query,
         payload="",
     )
 
-    request_url = EC2_ENDPOINT + "?" + query_str
+    query_str = "&".join([f"{key}={value}" for key, value in query.items()])
+    request_url = f"https://ec2.{region_name}.amazonaws.com?{query_str}"
 
     async with aiohttp.ClientSession() as session:
         response = await session.post(request_url, headers=headers)
         response_text = await response.text()
 
     sgs_full = xmltodict.parse(response_text)
-    groups = sgs_full["DescribeSecurityGroupsResponse"]["securityGroupInfo"]["item"]
+    if sgs_full.get("Response", False):
+        if sgs_full["Response"].get("Errors", False):
+            print(
+                f"{region_name}: {sgs_full['Response']['Errors']['Error']['Message']}"
+            )
+            return []
+
+    response_groups = sgs_full["DescribeSecurityGroupsResponse"]["securityGroupInfo"][
+        "item"
+    ]
+
+    # If there's just the default security group in a region, this is not a list, but a single dict
+    if not isinstance(response_groups, list):
+        groups = list()
+        groups.append(deepcopy(response_groups))
+    else:
+        groups = response_groups
+
+    for group in groups:
+        group["region_name"] = region_name
 
     return groups
 
 
 def ec2_get_region_names_async():
     result = asyncio.run(ec2_get_region_names_aiohttp())
-
     return result
 
 
@@ -147,7 +171,7 @@ async def ec2_get_region_names_aiohttp():
         payload="",
     )
 
-    request_url = EC2_ENDPOINT + "?" + query_str
+    request_url = "https://ec2.amazonaws.com" + "?" + query_str
 
     async with aiohttp.ClientSession() as session:
         response = await session.post(request_url, headers=headers)
